@@ -1,0 +1,31 @@
+# --- Auralis Backend Security ---
+.env
+.env.local
+.env.*
+
+# --- Python Environment ---
+venv/
+ENV/
+env/
+.venv/
+
+# --- Byte-compiled / Optimized files ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# --- Logs & Performance ---
+*.log
+.pytest_cache/
+.mypy_cache/
+
+# --- OS & Editors ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- Qdrant Local Data ---
+# (Only needed if you run Qdrant in a local Docker container)
+qdrant_storage/
