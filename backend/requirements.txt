@@ -34,7 +34,6 @@ proto-plus==1.27.2
 protobuf==5.29.6
 pyasn1==0.6.3
 pyasn1_modules==0.4.2
-PyAudio==0.2.14
 pycparser==3.0
 pydantic==2.13.0
 pydantic_core==2.46.0
