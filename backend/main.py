@@ -1,16 +1,44 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 from qdrant_client import QdrantClient
 import os
 import time
 import json
 from google import genai
 from dotenv import load_dotenv
-from database import check_postgres_health, check_neo4j_health, close_connections
+from database import check_postgres_health, check_neo4j_health, close_connections, get_db
+from auth import get_auth_context, AuthContext
+
+# Import route modules
+from routes import workflows, knowledge, graph
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(
+    title="Auralis Visual Workflow Engine",
+    description="Multi-tenant SaaS platform for designing and deploying custom voice agents",
+    version="1.0.0"
+)
+
+# Configure CORS middleware for frontend communication
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # Next.js development
+        "http://localhost:3001",
+        os.getenv("FRONTEND_URL", "https://auralis.vercel.app")
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include route modules
+app.include_router(workflows.router)
+app.include_router(knowledge.router)
+app.include_router(graph.router)
 
 # Initialize Clients
 q_client = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
@@ -51,8 +79,22 @@ async def health_check():
     }
 
 @app.post("/chat/completions")
-async def vapi_handler(request: Request):
+async def vapi_handler(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Vapi webhook endpoint for voice agent responses.
+    
+    Note: Authentication is optional for this endpoint as Vapi sends requests
+    without JWT tokens. In production, verify requests using Vapi webhook signatures.
+    
+    Requirements: 5.1, 5.2, 20.1, 20.2
+    """
     data = await request.json()
+    
+    # Extract assistant_id from Vapi payload (if available)
+    assistant_id = data.get("call", {}).get("assistantId") or data.get("assistant_id")
     
     # 1. Extract user query from OpenAI format (Custom LLM expects this)
     messages = data.get("messages", [])
