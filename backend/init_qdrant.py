@@ -13,15 +13,15 @@ def initialize_memory():
 
     collection_name = "auralis_knowledge"
 
-    # Create collection with 1536 dimensions (Standard for OpenAI/Gemini embeddings)
+    # Create collection with 768 dimensions (Gemini text-embedding-004)
     client.recreate_collection(
         collection_name=collection_name,
         vectors_config=models.VectorParams(
-            size=1536, 
+            size=768,  # Gemini text-embedding-004 dimension
             distance=models.Distance.COSINE
         ),
     )
-    print(f"✅ Collection '{collection_name}' initialized in Qdrant.")
+    print(f"[SUCCESS] Collection '{collection_name}' initialized in Qdrant.")
 
 if __name__ == "__main__":
     initialize_memory()

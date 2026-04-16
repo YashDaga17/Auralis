@@ -6,6 +6,7 @@ import time
 import json
 from google import genai
 from dotenv import load_dotenv
+from database import check_postgres_health, check_neo4j_health, close_connections
 
 load_dotenv()
 
@@ -15,9 +16,39 @@ app = FastAPI()
 q_client = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
 genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+# Shutdown event
+@app.on_event("shutdown")
+def shutdown_event():
+    """Clean up database connections on shutdown."""
+    close_connections()
+
 @app.get("/")
 async def root():
     return {"status": "Auralis is Online", "message": "Backend is reachable."}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for all services."""
+    postgres_healthy = check_postgres_health()
+    neo4j_healthy = check_neo4j_health()
+    
+    # Check Qdrant
+    qdrant_healthy = False
+    try:
+        q_client.get_collections()
+        qdrant_healthy = True
+    except Exception:
+        pass
+    
+    return {
+        "status": "healthy" if all([postgres_healthy, qdrant_healthy]) else "degraded",
+        "services": {
+            "postgres": "healthy" if postgres_healthy else "unhealthy",
+            "qdrant": "healthy" if qdrant_healthy else "unhealthy",
+            "neo4j": "healthy" if neo4j_healthy else "not_configured",
+            "gemini": "configured"
+        }
+    }
 
 @app.post("/chat/completions")
 async def vapi_handler(request: Request):
