@@ -58,3 +58,7 @@ uvicorn==0.44.0
 websockets==16.0
 pytest==8.3.4
 pytest-asyncio==0.25.2
+mistralai==1.2.7
+tiktoken==0.8.0
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.26.1

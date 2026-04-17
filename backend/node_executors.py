@@ -10,6 +10,7 @@ Requirements: 17.1, 17.2, 17.3, 17.4, 17.5, 9.1, 9.2, 9.3, 9.4, 9.5
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Type
 import logging
+import asyncio
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -1490,3 +1491,1254 @@ class ActionNodeExecutor(NodeExecutor):
 
 # Register the Action executor with the global registry
 register_executor('action', ActionNodeExecutor)
+
+
+# ============================================================================
+# Graph Query Node Executor
+# ============================================================================
+
+
+class GraphQueryNodeExecutor(NodeExecutor):
+    """
+    Executor for Graph Query nodes.
+    
+    Queries the Neo4j knowledge graph using natural language questions.
+    Generates Cypher queries via LLM based on graph schema and user question.
+    Enforces read-only queries and supports self-correction on failure.
+    
+    Requirements: 41.1, 41.2, 41.3, 41.4, 41.5, 41.6, 41.7, 41.8, 41.9
+    """
+    
+    def __init__(self, neo4j_driver, gemini_client):
+        """
+        Initialize the Graph Query node executor.
+        
+        Args:
+            neo4j_driver: Neo4j driver instance for graph queries
+            gemini_client: Gemini client for Cypher generation
+        """
+        self.neo4j = neo4j_driver
+        self.gemini = gemini_client
+        logger.info("GraphQueryNodeExecutor initialized")
+    
+    async def execute(
+        self,
+        config: Dict[str, Any],
+        context: Dict[str, Any],
+        session: Dict[str, Any]
+    ) -> str:
+        """
+        Execute Graph Query node to query Neo4j knowledge graph.
+        
+        Args:
+            config: Node configuration containing:
+                - max_depth: Maximum relationship hops (default: 3)
+                - entity_types: Optional list of entity types to filter
+                - relationship_types: Optional list of relationship types to filter
+                - timeout_ms: Query timeout in milliseconds (default: 5000)
+            context: Runtime context with outputs from previous nodes
+            session: Session context containing company_id and user information
+        
+        Returns:
+            JSON string containing graph query results
+        
+        Raises:
+            NodeExecutionError: If graph query fails
+            
+        Requirements: 41.1, 41.2, 41.3, 41.4, 41.5, 41.6, 41.7, 41.8, 41.9
+        """
+        try:
+            # Extract configuration parameters
+            max_depth = config.get('max_depth', 3)
+            entity_types = config.get('entity_types', [])
+            relationship_types = config.get('relationship_types', [])
+            timeout_ms = config.get('timeout_ms', 5000)
+            company_id = session.get('company_id')
+            
+            if not company_id:
+                raise ValueError("company_id is required in session context for tenant isolation")
+            
+            if not self.neo4j:
+                raise ValueError("Neo4j driver not initialized. Check NEO4J_URI and NEO4J_PASSWORD.")
+            
+            # Requirement 41.2: Get user's question from context
+            user_query = context.get('trigger_output', '')
+            if not user_query:
+                user_query = session.get('user_transcript', '')
+            
+            if not user_query:
+                raise ValueError("No user query found in context or session")
+            
+            logger.info(
+                f"Executing Graph Query node - "
+                f"company_id={company_id}, "
+                f"max_depth={max_depth}, "
+                f"query_length={len(user_query)}"
+            )
+            
+            # Requirement 41.2: Get graph schema for company
+            schema = await self._get_graph_schema(company_id)
+            
+            # Requirement 41.3: Generate Cypher query using LLM
+            cypher_query = await self._generate_cypher_query(
+                user_query,
+                schema,
+                company_id,
+                max_depth,
+                entity_types,
+                relationship_types
+            )
+            
+            logger.debug(f"Generated Cypher query: {cypher_query}")
+            
+            # Requirement 41.7: Validate read-only query
+            if not self._is_read_only_query(cypher_query):
+                raise SecurityError(
+                    "Only read-only Cypher queries are allowed. "
+                    "Queries with CREATE, DELETE, SET, or MERGE are forbidden."
+                )
+            
+            # Requirement 41.4, 41.8: Execute query with timeout
+            try:
+                results = await self._execute_cypher_query(
+                    cypher_query,
+                    company_id,
+                    timeout_ms
+                )
+                
+                # Requirement 41.6: Format results as JSON
+                import json
+                results_json = json.dumps(results, indent=2, default=str)
+                
+                logger.info(
+                    f"Graph Query node execution complete - "
+                    f"returned {len(results)} results, "
+                    f"json_length={len(results_json)}"
+                )
+                
+                return results_json
+                
+            except Exception as e:
+                # Requirement 41.5: Attempt self-correction on failure
+                logger.warning(f"Initial Cypher query failed: {str(e)}")
+                logger.info("Attempting self-correction...")
+                
+                corrected_results = await self._retry_with_correction(
+                    cypher_query,
+                    str(e),
+                    user_query,
+                    schema,
+                    company_id,
+                    max_depth,
+                    timeout_ms
+                )
+                
+                return corrected_results
+        
+        except Exception as e:
+            logger.error(f"Graph Query node execution failed: {type(e).__name__} - {str(e)}")
+            raise NodeExecutionError(
+                node_id="graph_query_node",
+                error_type=type(e).__name__,
+                error_message=str(e)
+            )
+    
+    async def _get_graph_schema(self, company_id: str) -> str:
+        """
+        Get graph schema (ontology) for company from Neo4j.
+        
+        Requirement: 41.2
+        
+        Args:
+            company_id: Company identifier
+            
+        Returns:
+            String representation of graph schema
+        """
+        try:
+            with self.neo4j.session() as neo_session:
+                # Get all node labels for this company
+                node_labels_query = """
+                MATCH (n)
+                WHERE n.company_id = $company_id
+                RETURN DISTINCT labels(n) as labels
+                LIMIT 100
+                """
+                
+                node_results = neo_session.run(node_labels_query, company_id=company_id)
+                
+                # Extract unique labels
+                all_labels = set()
+                for record in node_results:
+                    labels = record['labels']
+                    for label in labels:
+                        if label != 'Node':  # Skip generic Node label
+                            all_labels.add(label)
+                
+                # Get all relationship types for this company
+                rel_types_query = """
+                MATCH (a)-[r]->(b)
+                WHERE a.company_id = $company_id
+                RETURN DISTINCT type(r) as rel_type
+                LIMIT 100
+                """
+                
+                rel_results = neo_session.run(rel_types_query, company_id=company_id)
+                
+                # Extract unique relationship types
+                all_rel_types = set()
+                for record in rel_results:
+                    all_rel_types.add(record['rel_type'])
+                
+                # Format schema as string
+                schema = f"""Graph Schema for company {company_id}:
+
+Node Types (Labels):
+{', '.join(sorted(all_labels)) if all_labels else 'No nodes found'}
+
+Relationship Types:
+{', '.join(sorted(all_rel_types)) if all_rel_types else 'No relationships found'}
+
+All nodes have a 'company_id' property that must be filtered on.
+Common node properties: name, created_at, updated_at
+Relationship properties: confidence, source_document_id, created_at"""
+                
+                logger.debug(f"Retrieved graph schema: {len(all_labels)} node types, {len(all_rel_types)} relationship types")
+                
+                return schema
+        
+        except Exception as e:
+            logger.error(f"Failed to retrieve graph schema: {str(e)}")
+            # Return a minimal schema if retrieval fails
+            return f"""Graph Schema for company {company_id}:
+
+Node Types: Person, Project, Product, Department, Document, Company, Technology, Location
+Relationship Types: MANAGES, OWNS, REPORTS_TO, WORKS_ON, CREATED, USES, LOCATED_IN, PART_OF
+
+All nodes have a 'company_id' property that must be filtered on."""
+    
+    async def _generate_cypher_query(
+        self,
+        user_query: str,
+        schema: str,
+        company_id: str,
+        max_depth: int,
+        entity_types: list,
+        relationship_types: list
+    ) -> str:
+        """
+        Generate Cypher query using LLM based on user question and schema.
+        
+        Requirement: 41.3
+        
+        Args:
+            user_query: User's natural language question
+            schema: Graph schema string
+            company_id: Company identifier
+            max_depth: Maximum relationship hops
+            entity_types: Optional entity type filters
+            relationship_types: Optional relationship type filters
+            
+        Returns:
+            Generated Cypher query string
+        """
+        # Build filter hints
+        filter_hints = ""
+        if entity_types:
+            filter_hints += f"\n- Focus on these node types: {', '.join(entity_types)}"
+        if relationship_types:
+            filter_hints += f"\n- Focus on these relationship types: {', '.join(relationship_types)}"
+        
+        prompt = f"""You are a Cypher query expert. Generate a READ-ONLY Cypher query to answer the user's question.
+
+{schema}
+
+User Question: {user_query}
+
+Requirements:
+- Use MATCH and RETURN only (NO CREATE, DELETE, SET, MERGE, REMOVE)
+- ALWAYS filter by company_id: '{company_id}' on ALL nodes
+- Limit relationship traversal depth to {max_depth} hops maximum
+- Return results as a list of records with meaningful field names
+- Use LIMIT 50 to prevent large result sets
+- Handle cases where entities might not exist{filter_hints}
+
+Example format:
+MATCH (p:Person {{company_id: '{company_id}'}})-[r:MANAGES*1..{max_depth}]->(proj:Project {{company_id: '{company_id}'}})
+WHERE p.name CONTAINS 'John'
+RETURN p.name as person_name, type(r) as relationship, proj.name as project_name
+LIMIT 50
+
+Generate ONLY the Cypher query, no explanations or markdown:"""
+        
+        # Call Gemini to generate Cypher
+        response = self.gemini.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config={
+                'temperature': 0.1,  # Low temperature for consistent query generation
+                'max_output_tokens': 512
+            }
+        )
+        
+        cypher_query = response.text.strip()
+        
+        # Clean up response (remove markdown code blocks if present)
+        if cypher_query.startswith('```'):
+            lines = cypher_query.split('\n')
+            # Remove first and last lines (``` markers)
+            cypher_query = '\n'.join(lines[1:-1]) if len(lines) > 2 else cypher_query
+            # Remove 'cypher' language identifier if present
+            if cypher_query.startswith('cypher'):
+                cypher_query = cypher_query[6:].strip()
+        
+        return cypher_query
+    
+    def _is_read_only_query(self, cypher_query: str) -> bool:
+        """
+        Validate that Cypher query is read-only.
+        
+        Requirement: 41.7
+        
+        Args:
+            cypher_query: Cypher query to validate
+            
+        Returns:
+            True if query is read-only, False otherwise
+        """
+        # Convert to uppercase for case-insensitive matching
+        query_upper = cypher_query.upper()
+        
+        # List of forbidden write operations
+        forbidden_keywords = [
+            'CREATE',
+            'DELETE',
+            'SET',
+            'MERGE',
+            'REMOVE',
+            'DROP',
+            'DETACH'
+        ]
+        
+        # Check if any forbidden keyword is present
+        for keyword in forbidden_keywords:
+            if keyword in query_upper:
+                logger.warning(f"Query contains forbidden keyword: {keyword}")
+                return False
+        
+        return True
+    
+    async def _execute_cypher_query(
+        self,
+        cypher_query: str,
+        company_id: str,
+        timeout_ms: int
+    ) -> list:
+        """
+        Execute Cypher query against Neo4j with timeout.
+        
+        Requirements: 41.4, 41.8
+        
+        Args:
+            cypher_query: Cypher query to execute
+            company_id: Company identifier for logging
+            timeout_ms: Query timeout in milliseconds
+            
+        Returns:
+            List of result records as dictionaries
+        """
+        import asyncio
+        
+        def run_query():
+            """Synchronous query execution."""
+            with self.neo4j.session() as neo_session:
+                result = neo_session.run(cypher_query)
+                records = [record.data() for record in result]
+                return records
+        
+        # Requirement 41.8: Apply 5-second timeout (or configured timeout)
+        timeout_seconds = timeout_ms / 1000.0
+        
+        try:
+            # Run query in thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            records = await asyncio.wait_for(
+                loop.run_in_executor(None, run_query),
+                timeout=timeout_seconds
+            )
+            
+            logger.info(f"Cypher query executed successfully, returned {len(records)} records")
+            return records
+            
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Cypher query exceeded timeout of {timeout_ms}ms. "
+                f"Consider reducing max_depth or adding more specific filters."
+            )
+    
+    async def _retry_with_correction(
+        self,
+        original_query: str,
+        error_message: str,
+        user_query: str,
+        schema: str,
+        company_id: str,
+        max_depth: int,
+        timeout_ms: int
+    ) -> str:
+        """
+        Attempt to correct failed Cypher query using LLM.
+        
+        Requirement: 41.5
+        
+        Args:
+            original_query: The Cypher query that failed
+            error_message: Error message from Neo4j
+            user_query: Original user question
+            schema: Graph schema
+            company_id: Company identifier
+            max_depth: Maximum relationship hops
+            timeout_ms: Query timeout
+            
+        Returns:
+            JSON string of corrected query results
+            
+        Raises:
+            Exception: If correction also fails
+        """
+        logger.info("Attempting Cypher query self-correction")
+        
+        correction_prompt = f"""The following Cypher query failed with an error. Generate a corrected version.
+
+Original User Question: {user_query}
+
+{schema}
+
+Failed Cypher Query:
+{original_query}
+
+Error Message:
+{error_message}
+
+Generate a corrected READ-ONLY Cypher query that:
+- Fixes the syntax or logic error
+- Still answers the user's question
+- Uses MATCH and RETURN only (NO CREATE, DELETE, SET, MERGE)
+- Filters by company_id: '{company_id}' on ALL nodes
+- Limits depth to {max_depth} hops
+- Uses LIMIT 50
+
+Generate ONLY the corrected Cypher query, no explanations:"""
+        
+        # Call Gemini for correction
+        response = self.gemini.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=correction_prompt,
+            config={
+                'temperature': 0.1,
+                'max_output_tokens': 512
+            }
+        )
+        
+        corrected_query = response.text.strip()
+        
+        # Clean up response
+        if corrected_query.startswith('```'):
+            lines = corrected_query.split('\n')
+            corrected_query = '\n'.join(lines[1:-1]) if len(lines) > 2 else corrected_query
+            if corrected_query.startswith('cypher'):
+                corrected_query = corrected_query[6:].strip()
+        
+        logger.debug(f"Corrected Cypher query: {corrected_query}")
+        
+        # Validate corrected query is read-only
+        if not self._is_read_only_query(corrected_query):
+            raise SecurityError("Corrected query is not read-only")
+        
+        # Execute corrected query
+        try:
+            results = await self._execute_cypher_query(
+                corrected_query,
+                company_id,
+                timeout_ms
+            )
+            
+            import json
+            results_json = json.dumps(results, indent=2, default=str)
+            
+            logger.info(
+                f"Corrected query executed successfully - "
+                f"returned {len(results)} results"
+            )
+            
+            return results_json
+            
+        except Exception as e:
+            # Requirement 41.5: Only one retry attempt
+            logger.error(f"Corrected query also failed: {str(e)}")
+            raise Exception(
+                f"Graph query failed after correction attempt. "
+                f"Original error: {error_message}. "
+                f"Correction error: {str(e)}"
+            )
+
+
+# Custom exception for security violations
+class SecurityError(Exception):
+    """Raised when a security constraint is violated."""
+    pass
+
+
+# Register the Graph Query executor with the global registry
+register_executor('graph_query', GraphQueryNodeExecutor)
+
+
+# ============================================================================
+# Multi-Source RAG Node Executor
+# ============================================================================
+
+
+class MultiSourceRAGExecutor(NodeExecutor):
+    """
+    Executor for Multi-Source RAG nodes.
+    
+    Performs parallel vector searches across multiple Qdrant collections
+    to retrieve comprehensive information from diverse knowledge sources.
+    Supports weighted scoring for collection prioritization and includes
+    source metadata in results.
+    
+    Requirements: 28.1, 28.2, 28.3, 28.4, 28.5, 28.6, 28.7
+    """
+    
+    def __init__(self, qdrant_client, gemini_client):
+        """
+        Initialize the Multi-Source RAG node executor.
+        
+        Args:
+            qdrant_client: QdrantClient instance for vector search
+            gemini_client: Gemini client for embedding generation
+        """
+        self.qdrant = qdrant_client
+        self.gemini = gemini_client
+        logger.info("MultiSourceRAGExecutor initialized")
+    
+    async def execute(
+        self,
+        config: Dict[str, Any],
+        context: Dict[str, Any],
+        session: Dict[str, Any]
+    ) -> str:
+        """
+        Execute Multi-Source RAG node to retrieve from multiple collections.
+        
+        Args:
+            config: Node configuration containing:
+                - collection_names: List of Qdrant collection names to search
+                - query_template: Query string (with resolved context variables)
+                - result_limit: Maximum total results to return (default: 10)
+                - collection_weights: Optional dict mapping collection names to weights
+                - metadata_filters: Optional additional filters
+            context: Runtime context with outputs from previous nodes
+            session: Session context containing company_id for tenant isolation
+        
+        Returns:
+            Concatenated text from retrieved documents with source metadata
+        
+        Raises:
+            NodeExecutionError: If embedding generation or vector search fails
+            
+        Requirements: 28.1, 28.2, 28.3, 28.4, 28.5, 28.6, 28.7
+        """
+        try:
+            # Requirement 28.1: Accept multiple Qdrant collection names in config
+            collection_names = config.get('collection_names', [])
+            query_template = config.get('query_template', '')
+            result_limit = config.get('result_limit', 10)
+            collection_weights = config.get('collection_weights', {})
+            metadata_filters = config.get('metadata_filters', {})
+            company_id = session.get('company_id')
+            
+            if not collection_names:
+                raise ValueError("collection_names list is required in Multi-Source RAG node configuration")
+            
+            if not isinstance(collection_names, list):
+                raise ValueError("collection_names must be a list of collection names")
+            
+            if not company_id:
+                raise ValueError("company_id is required in session context for tenant isolation")
+            
+            logger.info(
+                f"Executing Multi-Source RAG node - "
+                f"collections={len(collection_names)}, "
+                f"query_length={len(query_template)}, "
+                f"total_limit={result_limit}"
+            )
+            
+            # Generate embeddings using Gemini text-embedding-004
+            embedding_result = self.gemini.models.embed_content(
+                model="text-embedding-004",
+                contents=query_template
+            )
+            
+            query_vector = embedding_result.embeddings[0].values
+            logger.debug(f"Generated embedding vector with dimension {len(query_vector)}")
+            
+            # Requirement 28.2: Perform parallel vector searches using asyncio.gather
+            search_tasks = []
+            for collection_name in collection_names:
+                task = self._search_collection(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    company_id=company_id,
+                    metadata_filters=metadata_filters,
+                    # Request more results per collection to allow for ranking
+                    limit=result_limit * 2
+                )
+                search_tasks.append(task)
+            
+            logger.debug(f"Launching {len(search_tasks)} parallel searches")
+            
+            # Execute all searches in parallel
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            
+            # Collect all results and handle exceptions
+            all_results = []
+            for idx, result in enumerate(search_results):
+                collection_name = collection_names[idx]
+                
+                if isinstance(result, Exception):
+                    logger.warning(
+                        f"Search failed for collection '{collection_name}': {str(result)}"
+                    )
+                    # Continue with other collections
+                    continue
+                
+                # Add collection name to each result for tracking
+                for search_result in result:
+                    all_results.append({
+                        'collection': collection_name,
+                        'score': search_result.score,
+                        'payload': search_result.payload,
+                        'id': search_result.id
+                    })
+            
+            logger.info(
+                f"Retrieved {len(all_results)} total results from "
+                f"{len(collection_names)} collections"
+            )
+            
+            # Requirement 28.3, 28.4: Rank results by relevance score with weighted scoring
+            ranked_results = self._rank_and_weight_results(
+                all_results,
+                collection_weights,
+                result_limit
+            )
+            
+            logger.info(
+                f"After ranking and weighting: {len(ranked_results)} results "
+                f"(limit: {result_limit})"
+            )
+            
+            # Requirement 28.5, 28.6, 28.7: Format results with source metadata
+            formatted_output = self._format_results_with_metadata(ranked_results)
+            
+            if not formatted_output:
+                logger.warning(
+                    f"No documents retrieved from any collection. Returning empty string."
+                )
+                formatted_output = ""
+            
+            logger.info(
+                f"Multi-Source RAG node execution complete - "
+                f"retrieved {len(ranked_results)} documents, "
+                f"total_length={len(formatted_output)}"
+            )
+            
+            return formatted_output
+            
+        except Exception as e:
+            logger.error(f"Multi-Source RAG node execution failed: {type(e).__name__} - {str(e)}")
+            raise NodeExecutionError(
+                node_id="multi_source_rag_node",
+                error_type=type(e).__name__,
+                error_message=str(e)
+            )
+    
+    async def _search_collection(
+        self,
+        collection_name: str,
+        query_vector: list,
+        company_id: str,
+        metadata_filters: Dict[str, Any],
+        limit: int
+    ) -> list:
+        """
+        Search a single Qdrant collection.
+        
+        Requirement: 28.2
+        
+        Args:
+            collection_name: Name of the collection to search
+            query_vector: Embedding vector for the query
+            company_id: Company identifier for tenant isolation
+            metadata_filters: Additional metadata filters
+            limit: Maximum results to retrieve from this collection
+            
+        Returns:
+            List of search results from Qdrant
+        """
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        
+        # Build filter with company_id for tenant isolation
+        filter_conditions = [
+            FieldCondition(
+                key="company_id",
+                match=MatchValue(value=company_id)
+            )
+        ]
+        
+        # Add any additional metadata filters
+        for key, value in metadata_filters.items():
+            filter_conditions.append(
+                FieldCondition(
+                    key=key,
+                    match=MatchValue(value=value)
+                )
+            )
+        
+        search_filter = Filter(must=filter_conditions) if filter_conditions else None
+        
+        # Namespace collection by company_id
+        namespaced_collection = f"{company_id}_{collection_name}"
+        
+        logger.debug(
+            f"Searching collection '{namespaced_collection}' with "
+            f"{len(filter_conditions)} filters, limit={limit}"
+        )
+        
+        try:
+            # Perform vector search
+            search_results = self.qdrant.search(
+                collection_name=namespaced_collection,
+                query_vector=query_vector,
+                query_filter=search_filter,
+                limit=limit
+            )
+            
+            logger.debug(
+                f"Collection '{collection_name}' returned {len(search_results)} results"
+            )
+            
+            return search_results
+            
+        except Exception as e:
+            logger.error(
+                f"Failed to search collection '{namespaced_collection}': {str(e)}"
+            )
+            # Re-raise to be caught by gather
+            raise
+    
+    def _rank_and_weight_results(
+        self,
+        all_results: list,
+        collection_weights: Dict[str, float],
+        limit: int
+    ) -> list:
+        """
+        Rank results by relevance score with optional collection weighting.
+        
+        Requirements: 28.3, 28.4
+        
+        Args:
+            all_results: List of all search results from all collections
+            collection_weights: Dictionary mapping collection names to weight multipliers
+            limit: Maximum number of results to return
+            
+        Returns:
+            Top N ranked results after applying weights
+        """
+        # Requirement 28.4: Apply weighted scoring for collection prioritization
+        for result in all_results:
+            collection_name = result['collection']
+            weight = collection_weights.get(collection_name, 1.0)
+            
+            # Apply weight to score
+            result['weighted_score'] = result['score'] * weight
+            result['weight'] = weight
+        
+        # Requirement 28.3: Rank results by weighted relevance score
+        ranked_results = sorted(
+            all_results,
+            key=lambda x: x['weighted_score'],
+            reverse=True  # Higher scores first
+        )
+        
+        # Return top N results
+        top_results = ranked_results[:limit]
+        
+        logger.debug(
+            f"Ranked {len(all_results)} results, returning top {len(top_results)}"
+        )
+        
+        return top_results
+    
+    def _format_results_with_metadata(self, results: list) -> str:
+        """
+        Format results with source metadata for LLM consumption.
+        
+        Requirements: 28.5, 28.6, 28.7
+        
+        Args:
+            results: List of ranked search results
+            
+        Returns:
+            Formatted string with documents and source metadata
+        """
+        formatted_chunks = []
+        
+        for idx, result in enumerate(results, 1):
+            # Extract information
+            collection = result['collection']
+            score = result['score']
+            weighted_score = result['weighted_score']
+            weight = result['weight']
+            payload = result['payload']
+            
+            # Requirement 28.6: Include source metadata
+            text = payload.get('text', '')
+            document_name = payload.get('filename', 'Unknown')
+            chunk_index = payload.get('chunk_index', 0)
+            
+            # Format with clear source attribution
+            # Requirement 28.7: Include collection_name and document_name in results
+            chunk_header = (
+                f"[Source {idx}: {collection} - {document_name} "
+                f"(chunk {chunk_index}, score: {score:.3f}"
+            )
+            
+            # Add weight info if weighted scoring was used
+            if weight != 1.0:
+                chunk_header += f", weight: {weight:.2f}, weighted_score: {weighted_score:.3f}"
+            
+            chunk_header += ")]"
+            
+            formatted_chunk = f"{chunk_header}\n{text}"
+            formatted_chunks.append(formatted_chunk)
+        
+        # Requirement 28.5: Concatenate all results with clear separation
+        formatted_output = "\n\n---\n\n".join(formatted_chunks)
+        
+        return formatted_output
+
+
+# Register the Multi-Source RAG executor with the global registry
+register_executor('multi_source_rag', MultiSourceRAGExecutor)
+
+
+
+# ============================================================================
+# Hybrid GraphRAG Executor
+# ============================================================================
+
+
+class HybridGraphRAGExecutor(NodeExecutor):
+    """
+    Executor for Hybrid GraphRAG nodes.
+    
+    Combines vector search (RAG) and graph traversal (Graph Query) to provide
+    comprehensive retrieval that includes both semantic similarity and explicit
+    entity relationships. Executes both retrieval methods in parallel and merges
+    results into a hybrid context for LLM consumption.
+    
+    Requirements: 42.1, 42.2, 42.3, 42.6
+    """
+    
+    def __init__(self, qdrant_client, gemini_client, neo4j_driver):
+        """
+        Initialize the Hybrid GraphRAG node executor.
+        
+        Args:
+            qdrant_client: QdrantClient instance for vector search
+            gemini_client: Gemini client for embedding generation and Cypher generation
+            neo4j_driver: Neo4j driver instance for graph queries
+        """
+        self.qdrant = qdrant_client
+        self.gemini = gemini_client
+        self.neo4j = neo4j_driver
+        
+        # Initialize component executors for reuse
+        self.rag_executor = RAGNodeExecutor(qdrant_client, gemini_client)
+        self.graph_executor = GraphQueryNodeExecutor(neo4j_driver, gemini_client)
+        
+        logger.info("HybridGraphRAGExecutor initialized")
+    
+    async def execute(
+        self,
+        config: Dict[str, Any],
+        context: Dict[str, Any],
+        session: Dict[str, Any]
+    ) -> str:
+        """
+        Execute Hybrid GraphRAG node to retrieve from both vector and graph sources.
+        
+        This method:
+        1. Executes vector search and graph query in parallel
+        2. Tracks retrieval latency separately for each source
+        3. Merges results from both sources into a hybrid context
+        4. Formats the hybrid context for LLM consumption
+        
+        Args:
+            config: Node configuration containing:
+                - rag_config: Configuration for RAG node (collection_name, query_template, result_limit)
+                - graph_config: Configuration for Graph Query node (max_depth, entity_types, relationship_types)
+                - merge_strategy: How to combine results ('sequential', 'interleaved', 'weighted')
+                - include_latency_metadata: Whether to include timing info in output (default: False)
+            context: Runtime context with outputs from previous nodes
+            session: Session context containing company_id and user information
+        
+        Returns:
+            Formatted hybrid context string containing both vector and graph results
+        
+        Raises:
+            NodeExecutionError: If both retrieval methods fail
+            
+        Requirements: 42.1, 42.2, 42.3, 42.6
+        """
+        import time
+        
+        try:
+            # Extract configuration
+            rag_config = config.get('rag_config', {})
+            graph_config = config.get('graph_config', {})
+            merge_strategy = config.get('merge_strategy', 'sequential')
+            include_latency_metadata = config.get('include_latency_metadata', False)
+            
+            if not rag_config and not graph_config:
+                raise ValueError(
+                    "At least one of rag_config or graph_config must be provided "
+                    "in Hybrid GraphRAG node configuration"
+                )
+            
+            company_id = session.get('company_id')
+            if not company_id:
+                raise ValueError("company_id is required in session context for tenant isolation")
+            
+            logger.info(
+                f"Executing Hybrid GraphRAG node - "
+                f"has_rag={bool(rag_config)}, "
+                f"has_graph={bool(graph_config)}, "
+                f"merge_strategy={merge_strategy}"
+            )
+            
+            # Requirement 42.2: Execute both retrieval nodes in parallel using asyncio.gather
+            tasks = []
+            task_names = []
+            
+            # Prepare vector search task if configured
+            if rag_config:
+                vector_start_time = time.time()
+                vector_task = self._execute_vector_search(rag_config, context, session)
+                tasks.append(vector_task)
+                task_names.append('vector')
+            
+            # Prepare graph query task if configured
+            if graph_config:
+                graph_start_time = time.time()
+                graph_task = self._execute_graph_query(graph_config, context, session)
+                tasks.append(graph_task)
+                task_names.append('graph')
+            
+            # Execute both tasks in parallel
+            logger.debug(f"Launching {len(tasks)} parallel retrieval tasks: {task_names}")
+            
+            overall_start_time = time.time()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            overall_duration = time.time() - overall_start_time
+            
+            # Process results and track latency
+            vector_result = None
+            vector_latency = 0.0
+            graph_result = None
+            graph_latency = 0.0
+            
+            for idx, result in enumerate(results):
+                task_name = task_names[idx]
+                
+                if isinstance(result, Exception):
+                    logger.warning(
+                        f"{task_name.capitalize()} retrieval failed: {str(result)}"
+                    )
+                    # Store None for failed retrieval
+                    if task_name == 'vector':
+                        vector_result = None
+                    else:
+                        graph_result = None
+                else:
+                    # Successful retrieval
+                    if task_name == 'vector':
+                        vector_result = result['content']
+                        vector_latency = result['latency']
+                        logger.info(
+                            f"Vector search completed in {vector_latency:.3f}s, "
+                            f"content_length={len(vector_result)}"
+                        )
+                    else:
+                        graph_result = result['content']
+                        graph_latency = result['latency']
+                        logger.info(
+                            f"Graph query completed in {graph_latency:.3f}s, "
+                            f"content_length={len(graph_result)}"
+                        )
+            
+            # Check if at least one retrieval succeeded
+            if vector_result is None and graph_result is None:
+                raise NodeExecutionError(
+                    node_id="hybrid_graphrag_node",
+                    error_type="AllRetrievalsFailed",
+                    error_message="Both vector search and graph query failed"
+                )
+            
+            # Requirement 42.6: Track retrieval latency separately
+            latency_metadata = {
+                'vector_latency_ms': round(vector_latency * 1000, 2),
+                'graph_latency_ms': round(graph_latency * 1000, 2),
+                'total_latency_ms': round(overall_duration * 1000, 2),
+                'parallel_speedup': round(
+                    (vector_latency + graph_latency) / overall_duration, 2
+                ) if overall_duration > 0 else 0
+            }
+            
+            logger.info(
+                f"Hybrid retrieval latency - "
+                f"vector: {latency_metadata['vector_latency_ms']}ms, "
+                f"graph: {latency_metadata['graph_latency_ms']}ms, "
+                f"total: {latency_metadata['total_latency_ms']}ms, "
+                f"speedup: {latency_metadata['parallel_speedup']}x"
+            )
+            
+            # Store latency metadata in context for monitoring
+            context['hybrid_graphrag_latency'] = latency_metadata
+            
+            # Requirement 42.3: Merge results from both sources and format for LLM
+            hybrid_context = self._format_hybrid_context(
+                vector_result=vector_result,
+                graph_result=graph_result,
+                merge_strategy=merge_strategy,
+                latency_metadata=latency_metadata if include_latency_metadata else None
+            )
+            
+            logger.info(
+                f"Hybrid GraphRAG node execution complete - "
+                f"hybrid_context_length={len(hybrid_context)}"
+            )
+            
+            return hybrid_context
+            
+        except Exception as e:
+            logger.error(f"Hybrid GraphRAG node execution failed: {type(e).__name__} - {str(e)}")
+            raise NodeExecutionError(
+                node_id="hybrid_graphrag_node",
+                error_type=type(e).__name__,
+                error_message=str(e)
+            )
+    
+    async def _execute_vector_search(
+        self,
+        rag_config: Dict[str, Any],
+        context: Dict[str, Any],
+        session: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute vector search using RAG executor.
+        
+        Requirement: 42.2
+        
+        Args:
+            rag_config: RAG node configuration
+            context: Runtime context
+            session: Session context
+            
+        Returns:
+            Dictionary with 'content' and 'latency' keys
+        """
+        import time
+        
+        start_time = time.time()
+        
+        try:
+            # Execute RAG node
+            vector_content = await self.rag_executor.execute(
+                config=rag_config,
+                context=context,
+                session=session
+            )
+            
+            latency = time.time() - start_time
+            
+            return {
+                'content': vector_content,
+                'latency': latency
+            }
+            
+        except Exception as e:
+            latency = time.time() - start_time
+            logger.error(f"Vector search failed after {latency:.3f}s: {str(e)}")
+            raise
+    
+    async def _execute_graph_query(
+        self,
+        graph_config: Dict[str, Any],
+        context: Dict[str, Any],
+        session: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute graph query using Graph Query executor.
+        
+        Requirement: 42.2
+        
+        Args:
+            graph_config: Graph Query node configuration
+            context: Runtime context
+            session: Session context
+            
+        Returns:
+            Dictionary with 'content' and 'latency' keys
+        """
+        import time
+        
+        start_time = time.time()
+        
+        try:
+            # Execute Graph Query node
+            graph_content = await self.graph_executor.execute(
+                config=graph_config,
+                context=context,
+                session=session
+            )
+            
+            latency = time.time() - start_time
+            
+            return {
+                'content': graph_content,
+                'latency': latency
+            }
+            
+        except Exception as e:
+            latency = time.time() - start_time
+            logger.error(f"Graph query failed after {latency:.3f}s: {str(e)}")
+            raise
+    
+    def _format_hybrid_context(
+        self,
+        vector_result: Optional[str],
+        graph_result: Optional[str],
+        merge_strategy: str,
+        latency_metadata: Optional[Dict[str, Any]]
+    ) -> str:
+        """
+        Format hybrid context for LLM consumption.
+        
+        Combines vector search results and graph query results into a single
+        formatted string that the LLM can use to generate comprehensive responses.
+        
+        Requirement: 42.3
+        
+        Args:
+            vector_result: Vector search results (or None if failed)
+            graph_result: Graph query results (or None if failed)
+            merge_strategy: How to combine results ('sequential', 'interleaved', 'weighted')
+            latency_metadata: Optional latency information to include
+            
+        Returns:
+            Formatted hybrid context string
+        """
+        sections = []
+        
+        # Add header
+        sections.append("=== HYBRID CONTEXT (Vector + Graph) ===\n")
+        
+        # Add latency metadata if requested
+        if latency_metadata:
+            sections.append(f"Retrieval Performance:")
+            sections.append(f"- Vector Search: {latency_metadata['vector_latency_ms']}ms")
+            sections.append(f"- Graph Query: {latency_metadata['graph_latency_ms']}ms")
+            sections.append(f"- Total (Parallel): {latency_metadata['total_latency_ms']}ms")
+            sections.append(f"- Speedup: {latency_metadata['parallel_speedup']}x\n")
+        
+        # Format based on merge strategy
+        if merge_strategy == 'sequential':
+            # Vector results first, then graph results
+            if vector_result:
+                sections.append("--- VECTOR CONTEXT (Semantic Similarity) ---")
+                sections.append(vector_result)
+                sections.append("")
+            
+            if graph_result:
+                sections.append("--- GRAPH CONTEXT (Entity Relationships) ---")
+                sections.append(graph_result)
+                sections.append("")
+        
+        elif merge_strategy == 'interleaved':
+            # Alternate between vector and graph sections
+            if vector_result and graph_result:
+                sections.append("--- COMBINED CONTEXT ---")
+                sections.append("\n[Vector Context - Semantic Similarity]")
+                sections.append(vector_result)
+                sections.append("\n[Graph Context - Entity Relationships]")
+                sections.append(graph_result)
+                sections.append("")
+            elif vector_result:
+                sections.append("--- VECTOR CONTEXT ONLY ---")
+                sections.append(vector_result)
+                sections.append("")
+            elif graph_result:
+                sections.append("--- GRAPH CONTEXT ONLY ---")
+                sections.append(graph_result)
+                sections.append("")
+        
+        elif merge_strategy == 'weighted':
+            # Prioritize one source over the other based on configuration
+            # For now, treat equally - future enhancement could add weights
+            if vector_result and graph_result:
+                sections.append("--- PRIMARY CONTEXT (Vector) ---")
+                sections.append(vector_result)
+                sections.append("\n--- SUPPORTING CONTEXT (Graph) ---")
+                sections.append(graph_result)
+                sections.append("")
+            elif vector_result:
+                sections.append("--- VECTOR CONTEXT ---")
+                sections.append(vector_result)
+                sections.append("")
+            elif graph_result:
+                sections.append("--- GRAPH CONTEXT ---")
+                sections.append(graph_result)
+                sections.append("")
+        
+        else:
+            # Default: sequential
+            logger.warning(f"Unknown merge_strategy '{merge_strategy}', using sequential")
+            if vector_result:
+                sections.append("--- VECTOR CONTEXT ---")
+                sections.append(vector_result)
+                sections.append("")
+            if graph_result:
+                sections.append("--- GRAPH CONTEXT ---")
+                sections.append(graph_result)
+                sections.append("")
+        
+        # Add instruction for LLM
+        sections.append("=== INSTRUCTIONS ===")
+        sections.append(
+            "Cross-reference the vector context (semantic text excerpts) with the "
+            "graph context (entity relationships) to provide a comprehensive answer. "
+            "Cite both document sources and relationship paths when relevant."
+        )
+        
+        # Join all sections
+        hybrid_context = "\n".join(sections)
+        
+        return hybrid_context
+
+
+# Register the Hybrid GraphRAG executor with the global registry
+register_executor('hybrid_graphrag', HybridGraphRAGExecutor)

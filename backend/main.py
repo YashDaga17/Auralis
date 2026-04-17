@@ -6,6 +6,7 @@ from qdrant_client import QdrantClient
 import os
 import time
 import json
+import logging
 from google import genai
 from dotenv import load_dotenv
 from database import check_postgres_health, check_neo4j_health, close_connections, get_db
@@ -15,6 +16,13 @@ from auth import get_auth_context, AuthContext
 from routes import workflows, knowledge, graph
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Auralis Visual Workflow Engine",
@@ -86,16 +94,108 @@ async def vapi_handler(
     """
     Vapi webhook endpoint for voice agent responses.
     
+    This endpoint:
+    1. Parses OpenAI-compatible request format from Vapi
+    2. Extracts assistant_id from metadata
+    3. Retrieves workflow JSON from database
+    4. Executes workflow with WorkflowExecutionEngine
+    5. Streams response using Server-Sent Events
+    
     Note: Authentication is optional for this endpoint as Vapi sends requests
     without JWT tokens. In production, verify requests using Vapi webhook signatures.
     
-    Requirements: 5.1, 5.2, 20.1, 20.2
+    Requirements: 5.1, 5.2, 20.1, 20.2, 20.3, 20.4, 20.5, 20.6, 20.7
     """
+    start_time = time.time()
     data = await request.json()
     
-    # Extract assistant_id from Vapi payload (if available)
+    # Requirement 5.1: Extract assistant_id from Vapi payload
     assistant_id = data.get("call", {}).get("assistantId") or data.get("assistant_id")
     
+    # If no assistant_id, fall back to legacy hardcoded behavior
+    if not assistant_id:
+        return await _legacy_vapi_handler(data)
+    
+    try:
+        # Requirement 5.2: Retrieve workflow JSON from database
+        from models import Agent
+        agent = db.query(Agent).filter(Agent.agent_id == assistant_id).first()
+        
+        if not agent:
+            # Agent not found - return error response
+            logger.error(f"Agent {assistant_id} not found in database")
+            return await _legacy_vapi_handler(data)
+        
+        workflow_json = agent.workflow_json
+        
+        # Handle case where workflow_json might be stored as string (e.g., in SQLite tests)
+        if isinstance(workflow_json, str):
+            workflow_json = json.loads(workflow_json)
+        
+        # Requirement 5.3, 5.4, 5.5: Execute workflow with WorkflowExecutionEngine
+        from workflow_execution import WorkflowExecutionEngine
+        
+        engine = WorkflowExecutionEngine(workflow_json=workflow_json, vapi_payload=data)
+        final_output = await engine.execute()
+        
+        # Calculate execution time
+        execution_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Log performance metrics
+        logger.info(f"Workflow execution completed in {execution_time_ms}ms")
+        if execution_time_ms > 800:
+            logger.warning(f"Workflow execution exceeded 800ms target: {execution_time_ms}ms")
+        
+        # Requirement 20.1, 20.2, 20.3, 20.4, 20.5, 20.6: Stream response using SSE
+        async def stream_generator():
+            # Requirement 20.2: Format SSE messages according to OpenAI chat completion chunk format
+            chunk = {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": "auralis-workflow-engine",
+                "choices": [{
+                    "delta": {"content": final_output},
+                    "index": 0,
+                    "finish_reason": None
+                }]
+            }
+            # Requirement 20.3: Send chunk with delta.content
+            yield f"data: {json.dumps(chunk)}\n\n"
+            
+            # Requirement 20.4: Send final chunk with finish_reason set to "stop"
+            stop_chunk = {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": "auralis-workflow-engine",
+                "choices": [{
+                    "delta": {},
+                    "index": 0,
+                    "finish_reason": "stop"
+                }]
+            }
+            yield f"data: {json.dumps(stop_chunk)}\n\n"
+            
+            # Requirement 20.5: Send "data: [DONE]" as the last SSE message
+            yield "data: [DONE]\n\n"
+        
+        # Requirement 20.6: Maintain streaming connection until all chunks are sent
+        return StreamingResponse(stream_generator(), media_type="text/event-stream")
+        
+    except Exception as e:
+        logger.error(f"Error executing workflow for agent {assistant_id}: {e}", exc_info=True)
+        # Fall back to legacy handler on error
+        return await _legacy_vapi_handler(data)
+
+
+async def _legacy_vapi_handler(data: dict):
+    """
+    Legacy Vapi handler for backward compatibility.
+    
+    This handler provides the original hardcoded RAG + LLM behavior
+    when no workflow is configured or when workflow execution fails.
+    """
     # 1. Extract user query from OpenAI format (Custom LLM expects this)
     messages = data.get("messages", [])
     user_query = ""
