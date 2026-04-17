@@ -1,10 +1,21 @@
 import AuralisButton from "@/components/AuralisButton";
+import Link from "next/link";
 
 export default function Home() {
   return (
     <main className="min-h-screen bg-[#0a0a0b] flex flex-col items-center justify-center p-6 font-sans">
       {/* Background Glow Effect */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-4xl h-[400px] bg-indigo-500/10 blur-[120px] rounded-full" />
+
+      {/* Navigation */}
+      <nav className="absolute top-6 right-6 z-20">
+        <Link
+          href="/workflow-editor"
+          className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-colors shadow-lg"
+        >
+          🎨 Workflow Editor
+        </Link>
+      </nav>
 
       <div className="z-10 text-center space-y-12">
         <div className="space-y-4">

@@ -13,7 +13,7 @@ from database import check_postgres_health, check_neo4j_health, close_connection
 from auth import get_auth_context, AuthContext
 
 # Import route modules
-from routes import workflows, knowledge, graph
+from routes import workflows, knowledge, graph, voice_builder
 
 load_dotenv()
 
@@ -47,6 +47,7 @@ app.add_middleware(
 app.include_router(workflows.router)
 app.include_router(knowledge.router)
 app.include_router(graph.router)
+app.include_router(voice_builder.router)
 
 # Initialize Clients
 q_client = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
