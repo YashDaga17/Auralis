@@ -126,6 +126,12 @@ export default function WorkflowEditorPage() {
           </div>
           
           <div className="flex gap-3">
+            <a
+              href="/graph-explorer"
+              className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"
+            >
+              🕸️ Graph Explorer
+            </a>
             <button
               onClick={() => {
                 setShowVoiceBuilder(!showVoiceBuilder);
