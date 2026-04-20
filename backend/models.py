@@ -1,12 +1,25 @@
 """
 SQLAlchemy ORM models for multi-tenant agent registry.
 """
-from sqlalchemy import Column, String, DateTime, Integer, Float, ForeignKey, Text, Index
+from sqlalchemy import Column, String, DateTime, Integer, Float, ForeignKey, Text, Index, JSON, TypeDecorator
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import uuid
 from database import Base
+
+
+# Custom JSON type that works with both SQLite and PostgreSQL
+class JSONType(TypeDecorator):
+    """Platform-independent JSON type."""
+    impl = JSON
+    cache_ok = True
+    
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(JSONB())
+        else:
+            return dialect.type_descriptor(JSON())
 
 
 class Company(Base):
@@ -30,7 +43,7 @@ class Agent(Base):
     
     agent_id = Column(String(255), primary_key=True)  # Vapi assistant_id
     company_id = Column(UUID(as_uuid=True), ForeignKey("companies.company_id"), nullable=False)
-    workflow_json = Column(JSONB, nullable=False)
+    workflow_json = Column(JSONType, nullable=False)
     current_version_id = Column(UUID(as_uuid=True), ForeignKey("workflow_versions.version_id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -53,7 +66,7 @@ class WorkflowVersion(Base):
     
     version_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     agent_id = Column(String(255), ForeignKey("agents.agent_id"), nullable=False)
-    workflow_json = Column(JSONB, nullable=False)
+    workflow_json = Column(JSONType, nullable=False)
     created_by = Column(String(255))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
@@ -72,7 +85,7 @@ class ConversationHistory(Base):
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     user_message = Column(Text)
     agent_response = Column(Text)
-    extracted_entities = Column(JSONB)
+    extracted_entities = Column(JSONType)
     intent = Column(String(100))
     confidence = Column(Float)
     
@@ -91,15 +104,23 @@ class UserPreference(Base):
     """User-specific preferences for personalization."""
     __tablename__ = "user_preferences"
     
-    user_id = Column(String(255), primary_key=True)
+    # Use auto-incrementing ID as primary key
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), nullable=False)
     company_id = Column(UUID(as_uuid=True), ForeignKey("companies.company_id"), nullable=False)
-    agent_id = Column(String(255), ForeignKey("agents.agent_id"))
+    agent_id = Column(String(255), ForeignKey("agents.agent_id"), nullable=True)
     communication_style = Column(String(50))  # 'concise', 'detailed', 'technical'
-    preferred_sources = Column(JSONB)  # Array of collection names
-    notification_preferences = Column(JSONB)
+    preferred_sources = Column(JSONType)  # Array of collection names
+    notification_preferences = Column(JSONType)
     
     # Relationships
     company = relationship("Company", back_populates="user_preferences")
+    
+    # Indexes for efficient querying
+    __table_args__ = (
+        Index("idx_user_prefs_user_company", "user_id", "company_id"),
+        Index("idx_user_prefs_user_company_agent", "user_id", "company_id", "agent_id"),
+    )
 
 
 class ExecutionMetric(Base):
@@ -111,7 +132,7 @@ class ExecutionMetric(Base):
     company_id = Column(UUID(as_uuid=True), ForeignKey("companies.company_id"), nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     total_duration_ms = Column(Integer)
-    node_execution_times = Column(JSONB)  # {node_id: duration_ms}
+    node_execution_times = Column(JSONType)  # {node_id: duration_ms}
     intent_classification_accuracy = Column(Float)
     user_satisfaction_score = Column(Integer)
     

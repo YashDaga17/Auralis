@@ -81,26 +81,26 @@ export default function NodePalette({ className = '' }: NodePaletteProps) {
 
   return (
     <div className={`node-palette ${className}`}>
-      <div className="p-4 bg-gray-50 border-b border-gray-200">
-        <h3 className="text-lg font-semibold text-gray-800">Node Palette</h3>
-        <p className="text-sm text-gray-600 mt-1">Drag nodes onto the canvas</p>
+      <div className="p-4 bg-slate-800 border-b border-slate-700">
+        <h3 className="text-lg font-semibold text-white">Node Palette</h3>
+        <p className="text-sm text-slate-300 mt-1">Drag nodes onto the canvas</p>
       </div>
       
-      <div className="p-4 space-y-2 overflow-y-auto">
+      <div className="p-4 space-y-2 overflow-y-auto bg-slate-50">
         {nodeTypes.map((nodeType) => (
           <div
             key={nodeType.type}
             draggable
             onDragStart={(e) => onDragStart(e, nodeType.type)}
-            className="node-palette-item cursor-move p-3 bg-white border-2 border-gray-200 rounded-lg hover:border-gray-400 hover:shadow-md transition-all"
+            className="node-palette-item cursor-move p-3 bg-white border-2 border-slate-300 rounded-lg hover:border-indigo-500 hover:shadow-lg transition-all"
           >
             <div className="flex items-start gap-3">
-              <div className={`flex-shrink-0 w-10 h-10 ${nodeType.color} rounded-lg flex items-center justify-center text-xl`}>
+              <div className={`flex-shrink-0 w-10 h-10 ${nodeType.color} rounded-lg flex items-center justify-center text-xl shadow-md`}>
                 {nodeType.icon}
               </div>
               <div className="flex-1 min-w-0">
-                <h4 className="font-semibold text-gray-800 text-sm">{nodeType.label}</h4>
-                <p className="text-xs text-gray-600 mt-1">{nodeType.description}</p>
+                <h4 className="font-semibold text-slate-800 text-sm">{nodeType.label}</h4>
+                <p className="text-xs text-slate-600 mt-1">{nodeType.description}</p>
               </div>
             </div>
           </div>
@@ -112,8 +112,7 @@ export default function NodePalette({ className = '' }: NodePaletteProps) {
           display: flex;
           flex-direction: column;
           height: 100%;
-          background: white;
-          border-right: 1px solid #e5e7eb;
+          background: #f8fafc;
         }
         
         .node-palette-item {

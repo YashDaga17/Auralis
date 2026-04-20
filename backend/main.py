@@ -13,7 +13,7 @@ from database import check_postgres_health, check_neo4j_health, close_connection
 from auth import get_auth_context, AuthContext
 
 # Import route modules
-from routes import workflows, knowledge, graph, voice_builder
+from routes import workflows, knowledge, graph, voice_builder, preferences
 
 load_dotenv()
 
@@ -48,6 +48,7 @@ app.include_router(workflows.router)
 app.include_router(knowledge.router)
 app.include_router(graph.router)
 app.include_router(voice_builder.router)
+app.include_router(preferences.router)
 
 # Initialize Clients
 q_client = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
@@ -136,7 +137,11 @@ async def vapi_handler(
         # Requirement 5.3, 5.4, 5.5: Execute workflow with WorkflowExecutionEngine
         from workflow_execution import WorkflowExecutionEngine
         
-        engine = WorkflowExecutionEngine(workflow_json=workflow_json, vapi_payload=data)
+        engine = WorkflowExecutionEngine(
+            workflow_json=workflow_json, 
+            vapi_payload=data,
+            db_session=db  # Pass database session for conversation history
+        )
         final_output = await engine.execute()
         
         # Calculate execution time

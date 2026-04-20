@@ -251,10 +251,38 @@ function WorkflowCanvasInner({ onNodeSelect, onFileUpload, showValidationErrors 
         fitView
         attributionPosition="bottom-left"
       >
-        <Background />
+        <Background color="#94a3b8" gap={16} />
         <Controls />
         <MiniMap />
       </ReactFlow>
+      
+      {/* Empty state message */}
+      {localNodes.length === 0 && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          textAlign: 'center',
+          pointerEvents: 'none',
+          zIndex: 4,
+        }}>
+          <div style={{
+            fontSize: '24px',
+            fontWeight: 'bold',
+            color: '#475569',
+            marginBottom: '12px',
+          }}>
+            Workflow Canvas
+          </div>
+          <div style={{
+            fontSize: '16px',
+            color: '#64748b',
+          }}>
+            Drag nodes from the left palette to start building your workflow
+          </div>
+        </div>
+      )}
       
       {/* Validation Error Display */}
       {showValidationErrors && (

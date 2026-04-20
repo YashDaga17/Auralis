@@ -468,6 +468,45 @@ class LLMNodeExecutor(NodeExecutor):
         self.gemini = gemini_client
         logger.info("LLMNodeExecutor initialized")
     
+    def _get_style_instructions(self, communication_style: str) -> str:
+        """
+        Get style-specific instructions to append to system prompt.
+        
+        Args:
+            communication_style: User's preferred communication style
+                                ('concise', 'detailed', 'technical')
+        
+        Returns:
+            Style-specific instructions string
+            
+        Requirement: 37.3
+        """
+        style_map = {
+            'concise': (
+                "Communication Style: CONCISE\n"
+                "- Keep responses brief and to the point\n"
+                "- Use short sentences and simple language\n"
+                "- Avoid unnecessary details or explanations\n"
+                "- Aim for 2-3 sentences maximum unless more detail is explicitly requested"
+            ),
+            'detailed': (
+                "Communication Style: DETAILED\n"
+                "- Provide comprehensive explanations\n"
+                "- Include relevant context and background information\n"
+                "- Use examples to clarify concepts\n"
+                "- Balance thoroughness with clarity"
+            ),
+            'technical': (
+                "Communication Style: TECHNICAL\n"
+                "- Use precise technical terminology\n"
+                "- Include specific details, metrics, and data points\n"
+                "- Explain technical concepts in depth\n"
+                "- Assume the user has domain expertise"
+            )
+        }
+        
+        return style_map.get(communication_style, '')
+    
     async def execute(
         self,
         config: Dict[str, Any],
@@ -485,7 +524,7 @@ class LLMNodeExecutor(NodeExecutor):
                 - max_tokens: Maximum tokens to generate (default 1024)
                 - model: Model to use (default 'gemini-2.5-flash')
             context: Runtime context with outputs from previous nodes
-            session: Session context containing user information
+            session: Session context containing user information and preferences
         
         Returns:
             Generated text from the LLM
@@ -493,7 +532,7 @@ class LLMNodeExecutor(NodeExecutor):
         Raises:
             NodeExecutionError: If LLM generation fails
             
-        Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6
+        Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 37.3
         """
         try:
             # Requirement 7.1: Extract system_prompt and user_prompt from config
@@ -508,9 +547,30 @@ class LLMNodeExecutor(NodeExecutor):
             if not user_prompt:
                 raise ValueError("user_prompt is required in LLM node configuration")
             
+            # Requirement 37.3: Adapt response verbosity based on communication_style
+            user_preferences = session.get('user_preferences', {})
+            communication_style = user_preferences.get('communication_style', 'detailed')
+            
+            # Add style-specific instructions to system prompt
+            style_instructions = self._get_style_instructions(communication_style)
+            if style_instructions:
+                if system_prompt:
+                    system_prompt = f"{system_prompt}\n\n{style_instructions}"
+                else:
+                    system_prompt = style_instructions
+            
+            # Adjust max_tokens based on communication style
+            if communication_style == 'concise':
+                # Reduce max tokens for concise responses
+                max_tokens = min(max_tokens, 512)
+            elif communication_style == 'technical':
+                # Allow more tokens for technical detail
+                max_tokens = max(max_tokens, 1024)
+            
             logger.info(
                 f"Executing LLM node - model={model}, "
                 f"temperature={temperature}, max_tokens={max_tokens}, "
+                f"communication_style={communication_style}, "
                 f"system_prompt_length={len(system_prompt)}, "
                 f"user_prompt_length={len(user_prompt)}"
             )
@@ -2040,6 +2100,7 @@ class MultiSourceRAGExecutor(NodeExecutor):
                 - metadata_filters: Optional additional filters
             context: Runtime context with outputs from previous nodes
             session: Session context containing company_id for tenant isolation
+                    and user preferences
         
         Returns:
             Concatenated text from retrieved documents with source metadata
@@ -2047,7 +2108,7 @@ class MultiSourceRAGExecutor(NodeExecutor):
         Raises:
             NodeExecutionError: If embedding generation or vector search fails
             
-        Requirements: 28.1, 28.2, 28.3, 28.4, 28.5, 28.6, 28.7
+        Requirements: 28.1, 28.2, 28.3, 28.4, 28.5, 28.6, 28.7, 37.4
         """
         try:
             # Requirement 28.1: Accept multiple Qdrant collection names in config
@@ -2066,6 +2127,23 @@ class MultiSourceRAGExecutor(NodeExecutor):
             
             if not company_id:
                 raise ValueError("company_id is required in session context for tenant isolation")
+            
+            # Requirement 37.4: Prioritize collections based on user's preferred_sources
+            user_preferences = session.get('user_preferences', {})
+            preferred_sources = user_preferences.get('preferred_sources', [])
+            
+            # Merge user preferences with explicit collection weights
+            # User preferences take precedence if not explicitly overridden
+            if preferred_sources:
+                for source in preferred_sources:
+                    if source not in collection_weights:
+                        # Boost preferred sources by 1.5x
+                        collection_weights[source] = 1.5
+                
+                logger.info(
+                    f"Applied user preferred sources: {preferred_sources}, "
+                    f"weights: {collection_weights}"
+                )
             
             logger.info(
                 f"Executing Multi-Source RAG node - "
@@ -2127,7 +2205,7 @@ class MultiSourceRAGExecutor(NodeExecutor):
                 f"{len(collection_names)} collections"
             )
             
-            # Requirement 28.3, 28.4: Rank results by relevance score with weighted scoring
+            # Requirement 28.3, 28.4, 37.4: Rank results by relevance score with weighted scoring
             ranked_results = self._rank_and_weight_results(
                 all_results,
                 collection_weights,

@@ -23,18 +23,15 @@ export default function WorkflowEditorPage() {
 
   const handleSaveWorkflow = async () => {
     if (!token || !user) {
-      alert('Please log in to save workflows');
+      alert('Authentication required. Please sign in to save workflows.');
       return;
     }
 
-    // Validate workflow
     const validation = validateWorkflow();
     if (!validation.valid) {
       setShowValidationErrors(true);
       alert(
-        `Workflow validation failed:\n\n` +
-        `${validation.errors.length} error(s) found\n\n` +
-        `Please fix the errors before saving.`
+        `Workflow validation failed:\n\n${validation.errors.length} error(s) found\n\nPlease fix the errors before saving.`
       );
       return;
     }
@@ -58,19 +55,14 @@ export default function WorkflowEditorPage() {
   const handleValidateWorkflow = () => {
     const validation = validateWorkflow();
     if (validation.valid) {
-      alert('✅ Workflow is valid!');
+      alert('Workflow is valid!');
       setShowValidationErrors(false);
     } else {
-      // Show validation errors on canvas
       setShowValidationErrors(true);
-      
-      // Also show alert with summary
       const errorCount = validation.errors.length;
       const nodeErrorCount = validation.nodeErrors?.size || 0;
       alert(
-        `❌ Workflow validation failed:\n\n` +
-        `${errorCount} error(s) found across ${nodeErrorCount} node(s)\n\n` +
-        `Check the canvas for detailed error messages.`
+        `Workflow validation failed:\n\n${errorCount} error(s) found across ${nodeErrorCount} node(s)\n\nCheck the canvas for detailed error messages.`
       );
     }
   };
@@ -86,13 +78,13 @@ export default function WorkflowEditorPage() {
       const metadata = {
         workflow_name: 'My Workflow',
         description: 'Exported workflow from visual editor',
-        created_by: user?.id || 'unknown',
+        created_by: user?.id || 'guest',
         updated_at: new Date().toISOString(),
       };
       exportWorkflow(metadata);
-      alert('✅ Workflow exported successfully!');
+      alert('Workflow exported successfully!');
     } catch (error: any) {
-      alert(`❌ Failed to export workflow: ${error.message}`);
+      alert(`Failed to export workflow: ${error.message}`);
     }
   };
 
@@ -100,14 +92,10 @@ export default function WorkflowEditorPage() {
     try {
       await importWorkflow(file);
       setShowImportDialog(false);
-      alert('✅ Workflow imported successfully!');
+      alert('Workflow imported successfully!');
     } catch (error: any) {
-      alert(`❌ Failed to import workflow: ${error.message}`);
+      alert(`Failed to import workflow: ${error.message}`);
     }
-  };
-
-  const handleImportButtonClick = () => {
-    setShowImportDialog(true);
   };
 
   const handleFileUploaded = (jobId: string, filename: string) => {
@@ -117,20 +105,25 @@ export default function WorkflowEditorPage() {
 
   return (
     <div className="workflow-editor-container">
-      {/* Header */}
-      <header className="workflow-header bg-white border-b border-gray-200 px-6 py-4">
+      <header className="workflow-header bg-gradient-to-r from-slate-900 to-slate-800 border-b border-slate-700 px-6 py-4 shadow-lg">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-gray-800">Workflow Editor</h1>
-            <p className="text-sm text-gray-600 mt-1">Design your voice agent workflow</p>
+            <h1 className="text-2xl font-bold text-white">Auralis Workflow Editor</h1>
+            <p className="text-sm text-slate-300 mt-1">Design your voice agent workflow</p>
           </div>
           
           <div className="flex gap-3">
             <a
-              href="/graph-explorer"
-              className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"
+              href="/"
+              className="px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition-colors font-medium shadow-md"
             >
-              🕸️ Graph Explorer
+              Home
+            </a>
+            <a
+              href="/graph-explorer"
+              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium shadow-md"
+            >
+              Graph Explorer
             </a>
             <button
               onClick={() => {
@@ -140,88 +133,91 @@ export default function WorkflowEditorPage() {
                   setShowFileUpload(false);
                 }
               }}
-              className={`px-4 py-2 rounded-lg transition-colors ${
+              className={`px-4 py-2 rounded-lg transition-colors font-medium shadow-md ${
                 showVoiceBuilder
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-blue-500 text-white hover:bg-blue-600'
+                  ? 'bg-blue-700 text-white'
+                  : 'bg-blue-600 text-white hover:bg-blue-700'
               }`}
             >
-              🎤 Build with Voice
-            </button>
-            <button
-              onClick={() => setShowFileUpload(!showFileUpload)}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
-            >
-              📁 Upload Files
+              Build with Voice
             </button>
             <button
               onClick={() => {
+                if (!token || !user) {
+                  alert('Authentication required. Please sign in to upload files.');
+                  return;
+                }
+                setShowFileUpload(!showFileUpload);
+              }}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium shadow-md"
+            >
+              Upload Files
+            </button>
+            <button
+              onClick={() => {
+                if (!token) {
+                  alert('Authentication required. Please sign in to test workflows.');
+                  return;
+                }
                 setShowTestPanel(!showTestPanel);
                 if (!showTestPanel) {
                   setShowVoiceBuilder(false);
                 }
               }}
-              className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors"
+              className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium shadow-md"
             >
-              🧪 Test Workflow
+              Test Workflow
             </button>
             <button
               onClick={handleExportWorkflow}
-              className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"
+              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium shadow-md"
             >
-              📤 Export
+              Export
             </button>
             <button
-              onClick={handleImportButtonClick}
-              className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"
+              onClick={() => setShowImportDialog(true)}
+              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium shadow-md"
             >
-              📥 Import
+              Import
             </button>
             <button
               onClick={handleValidateWorkflow}
-              className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+              className="px-4 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 transition-colors font-medium shadow-md"
             >
-              ✓ Validate
+              Validate
             </button>
             <button
               onClick={handleSaveWorkflow}
-              className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors"
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium shadow-md"
             >
-              💾 Save
+              Save
             </button>
             <button
               onClick={handleClearWorkflow}
-              className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium shadow-md"
             >
-              🗑️ Clear
+              Clear
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
       <div className="workflow-content">
-        {/* Node Palette */}
-        <aside className="workflow-sidebar">
+        <aside className="workflow-sidebar bg-slate-50 border-r border-slate-200">
           <NodePalette />
         </aside>
 
-        {/* Canvas */}
-        <main className="workflow-canvas-area">
+        <main className="workflow-canvas-area bg-slate-100">
           <WorkflowCanvas
             onNodeSelect={setSelectedNode}
             onFileUpload={(_file, position) => {
-              if (token && user) {
-                // Handle file upload at specific position
-                console.log('File dropped at position:', position);
-              }
+              console.log('File dropped at position:', position);
             }}
             showValidationErrors={showValidationErrors}
           />
         </main>
 
-        {/* Configuration Panel or Voice Builder */}
-        <aside className="workflow-config-panel bg-white border-l border-gray-200 p-6">
+        <aside className="workflow-config-panel bg-white border-l border-slate-200 p-6">
           {showVoiceBuilder ? (
             <VoiceBuilder
               onCommandExecuted={(action, parameters) => {
@@ -234,17 +230,16 @@ export default function WorkflowEditorPage() {
         </aside>
       </div>
 
-      {/* File Upload Modal */}
       {showFileUpload && token && user && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4">
-            <div className="p-6 border-b border-gray-200 flex items-center justify-between">
-              <h2 className="text-xl font-semibold text-gray-800">Upload Knowledge Files</h2>
+            <div className="p-6 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-slate-800">Upload Knowledge Files</h2>
               <button
                 onClick={() => setShowFileUpload(false)}
-                className="text-gray-500 hover:text-gray-700"
+                className="text-slate-500 hover:text-slate-700 text-2xl leading-none"
               >
-                ✕
+                &times;
               </button>
             </div>
             <FileDropZone
@@ -256,26 +251,24 @@ export default function WorkflowEditorPage() {
         </div>
       )}
 
-      {/* Test Panel */}
       {showTestPanel && token && (
         <TestPanel token={token} onClose={() => setShowTestPanel(false)} />
       )}
 
-      {/* Import Dialog */}
       {showImportDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
-            <div className="p-6 border-b border-gray-200 flex items-center justify-between">
-              <h2 className="text-xl font-semibold text-gray-800">Import Workflow</h2>
+            <div className="p-6 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-slate-800">Import Workflow</h2>
               <button
                 onClick={() => setShowImportDialog(false)}
-                className="text-gray-500 hover:text-gray-700"
+                className="text-slate-500 hover:text-slate-700 text-2xl leading-none"
               >
-                ✕
+                &times;
               </button>
             </div>
             <div className="p-6">
-              <p className="text-sm text-gray-600 mb-4">
+              <p className="text-sm text-slate-600 mb-4">
                 Select a workflow JSON file to import. This will replace the current workflow on the canvas.
               </p>
               <input
@@ -287,7 +280,7 @@ export default function WorkflowEditorPage() {
                     handleImportWorkflow(file);
                   }
                 }}
-                className="block w-full text-sm text-gray-500
+                className="block w-full text-sm text-slate-500
                   file:mr-4 file:py-2 file:px-4
                   file:rounded-lg file:border-0
                   file:text-sm file:font-semibold
@@ -297,7 +290,7 @@ export default function WorkflowEditorPage() {
               />
               <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
                 <p className="text-xs text-yellow-800">
-                  ⚠️ Warning: Importing will clear the current workflow. Make sure to export your current work first if needed.
+                  Warning: Importing will clear the current workflow. Make sure to export your current work first if needed.
                 </p>
               </div>
             </div>
@@ -330,7 +323,6 @@ export default function WorkflowEditorPage() {
 
         .workflow-canvas-area {
           position: relative;
-          background: #f9fafb;
         }
 
         .workflow-config-panel {
